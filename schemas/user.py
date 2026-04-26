@@ -18,7 +18,7 @@ class UserResponse(BaseModel):
     id: int
     username: str
     email: str
-    phone: str | None
+    phone: str | None= 
     created_at: datetime
 
     class Config:
