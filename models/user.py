@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy import Column, Integer, String, DateTime, Boolean
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
@@ -12,6 +12,7 @@ class User(Base):
     email = Column(String(100), unique=True, nullable=False, index=True)
     phone = Column(String(20))
     password_hash = Column(String, nullable=False)
+    is_verified = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     crops = relationship("Crop", back_populates="farmer", cascade="all, delete")

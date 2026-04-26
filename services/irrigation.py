@@ -1,24 +1,28 @@
 import os
+import time
 import joblib
 import pandas as pd
-import requests
+import httpx
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 # Configuration
-MODEL_PATH = "agri_model_lgbm.joblib"
+MODEL_PATH = os.getenv("MODEL_PATH", "agri_model_lgbm.joblib")
 OWM_API_KEY = os.getenv("OWM_API_KEY", "YOUR_OPENWEATHERMAP_API_KEY")
-OWM_FORECAST_URL = "https://api.openweathermap.org/data/2.5/forecast"
-OWM_CURRENT_URL = "https://api.openweathermap.org/data/2.5/weather"
-YIELD_GAIN_THRESHOLD = 0.25
-RAIN_UPCOMING_SKIP_MM = 15.0
+OWM_FORECAST_URL = os.getenv("OWM_FORECAST_URL", "https://api.openweathermap.org/data/2.5/forecast")
+OWM_CURRENT_URL = os.getenv("OWM_CURRENT_URL", "https://api.openweathermap.org/data/2.5/weather")
+YIELD_GAIN_THRESHOLD = float(os.getenv("YIELD_GAIN_THRESHOLD", "0.25"))
+RAIN_UPCOMING_SKIP_MM = float(os.getenv("RAIN_UPCOMING_SKIP_MM", "15.0"))
+RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "40"))
+API_CALL_TIMESTAMPS: deque[datetime] = deque()
 
 # Load model
 print(f"Loading model from {MODEL_PATH}...")
 model = joblib.load(MODEL_PATH)
 print("Model ready.")
 
+
 def _owm_condition_to_label(description: str) -> str:
-    """Map OpenWeatherMap description → model's Weather_Condition categories."""
     desc = description.lower()
     if any(w in desc for w in ["rain", "drizzle", "shower", "thunder"]):
         return "Rainy"
@@ -26,30 +30,57 @@ def _owm_condition_to_label(description: str) -> str:
         return "Cloudy"
     return "Sunny"
 
+
+def _enforce_rate_limit() -> None:
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=1)
+    while API_CALL_TIMESTAMPS and API_CALL_TIMESTAMPS[0] < cutoff:
+        API_CALL_TIMESTAMPS.popleft()
+    if len(API_CALL_TIMESTAMPS) >= RATE_LIMIT_PER_MINUTE:
+        raise ValueError("Weather API rate limit exceeded. Try again in a moment.")
+    API_CALL_TIMESTAMPS.append(now)
+
+
+def _fetch_json(url: str, params: dict) -> dict:
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            response = httpx.get(url, params=params, timeout=10.0)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            last_error = exc
+            if response.status_code == 429 and attempt < 3:
+                time.sleep(2 ** attempt)
+            else:
+                break
+        except httpx.RequestError as exc:
+            last_error = exc
+            if attempt < 3:
+                time.sleep(2 ** attempt)
+    raise ValueError(f"Could not fetch weather data: {last_error}")
+
+
 def fetch_weekly_weather(lat: float, lon: float) -> dict:
-    """
-    Fetch weather data for approximately the current week.
-    """
+    if not OWM_API_KEY or "YOUR_OPENWEATHERMAP_API_KEY" in OWM_API_KEY:
+        raise ValueError("OpenWeatherMap API key is not configured.")
+
+    _enforce_rate_limit()
     params = {"lat": lat, "lon": lon, "appid": OWM_API_KEY, "units": "metric"}
 
-    # Current weather
-    cur_resp = requests.get(OWM_CURRENT_URL, params=params, timeout=10)
-    cur_resp.raise_for_status()
-    current = cur_resp.json()
+    current = _fetch_json(OWM_CURRENT_URL, params)
+    forecast = _fetch_json(OWM_FORECAST_URL, params)
 
     current_temp = current["main"]["temp"]
     current_rain = current.get("rain", {}).get("1h", 0.0)
     current_cond = _owm_condition_to_label(current["weather"][0]["description"])
 
-    # Forecast
-    fcast_resp = requests.get(OWM_FORECAST_URL, params=params, timeout=10)
-    fcast_resp.raise_for_status()
-    forecast = fcast_resp.json()
-
     now_utc = datetime.now(timezone.utc)
     cutoff_48h = now_utc + timedelta(hours=48)
 
-    temps, rains, conditions = [current_temp], [current_rain], [current_cond]
+    temps = [current_temp]
+    rains = [current_rain]
+    conditions = [current_cond]
     upcoming_rain_48h = current_rain
     days: dict[str, dict] = {}
 
@@ -73,7 +104,6 @@ def fetch_weekly_weather(lat: float, lon: float) -> dict:
         days[day_key]["rain_mm"] += rain
         days[day_key]["conditions"].append(cond)
 
-    # Summarise daily
     days_summary = []
     for d in days.values():
         avg_t = sum(d["temps"]) / len(d["temps"])
@@ -97,9 +127,9 @@ def fetch_weekly_weather(lat: float, lon: float) -> dict:
         "days_summary": days_summary,
     }
 
+
 def predict_yield(region, soil_type, crop_type, rainfall_mm, avg_temp,
                   fertilizer, irrigate, weather_condition, days_to_harvest) -> float:
-    """Run the LightGBM model and return predicted yield (tonnes/ha)."""
     row = pd.DataFrame({
         "Region": [region],
         "Soil_Type": [soil_type],
@@ -113,11 +143,9 @@ def predict_yield(region, soil_type, crop_type, rainfall_mm, avg_temp,
     })
     return float(model.predict(row)[0])
 
+
 def build_recommendation(weather: dict, yield_with: float,
                           yield_without: float, upcoming_rain: float) -> dict:
-    """
-    Combine model output and weather context into a recommendation.
-    """
     gain = yield_with - yield_without
 
     if upcoming_rain >= RAIN_UPCOMING_SKIP_MM:
@@ -152,11 +180,9 @@ def build_recommendation(weather: dict, yield_with: float,
         "yield_gain_tph": round(gain, 2),
     }
 
+
 def get_irrigation_advice(lat: float, lon: float, crop_type: str, soil_type: str,
                           region: str = "North", fertilizer: bool = True, days_to_harvest: int = 90):
-    """
-    Get irrigation advice.
-    """
     try:
         weather = fetch_weekly_weather(lat, lon)
     except Exception as e:
