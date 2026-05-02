@@ -11,7 +11,7 @@ def create_user(db: Session, user_data: UserRegister) -> User:
     new_user = User(
         username=user_data.username,
         email=user_data.email,
-        phone=user_data.phone,
+        #phone=user_data.phone,
         password_hash=hashed,
         is_verified=False
     )

@@ -10,6 +10,7 @@ from routes.task import router as task_router
 from routes.recommendation import router as rec_router
 from models.verification import VerificationCode
 
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -40,12 +41,11 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    logger.warning("Validation error %s %s", request.url, exc.errors())
+    logger.warning("Validation error %s", request.url)
     return JSONResponse(
         status_code=422,
-        content={"error": "validation_error", "detail": exc.errors()},
+        content={"error": "validation_error", "detail": str(exc.errors())},
     )
-
 
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):

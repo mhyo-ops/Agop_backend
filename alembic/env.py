@@ -1,5 +1,7 @@
 from __future__ import with_statement
+import sys
 import os
+sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 from logging.config import fileConfig
 from sqlalchemy import pool
 from sqlalchemy import create_engine
