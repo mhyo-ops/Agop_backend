@@ -1,0 +1,5 @@
+cd /home/mhyo/Desktop/agritech-backend
+echo "3.11.0" > .python-version
+git add .python-version
+git commit -m "fix python version for render"
+git push
